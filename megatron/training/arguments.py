@@ -3105,6 +3105,12 @@ def _add_distributed_args(parser):
                        'non-Muon embeddings, biases, layernorm) stay in the layer-wise '
                        'optimizer and the optimizer uses the allgather_params() codepath. '
                        'Does not select the compact layout.')
+    group.add_argument('--disable-grad-buffers-cpu-backup', action='store_true',
+                       help='Allocate DDP gradient buffers in a torch_memory_saver region '
+                       'without CPU backup.')
+    group.add_argument('--disable-param-buffers-cpu-backup', action='store_true',
+                       help='Allocate distributed-optimizer parameter buffers in a '
+                       'torch_memory_saver region without CPU backup.')
     group.add_argument('--use-nccl-ub', action='store_true', dest='nccl_ub',
                        help='Use the userbuffer registration for DP/FSDP communication buffers.'
                        'This option will reduce GPU SM usage for the DP/FSDP communication,'

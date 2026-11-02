@@ -218,6 +218,16 @@ class DistributedDataParallelConfig:
     again without disturbing persistent parameter storage.
     """
 
+    disable_grad_buffers_cpu_backup: bool = False
+    """If true, allocate the gradient buffers in a torch_memory_saver region without CPU backup,
+    so that pausing that memory (e.g. between RL phases) drops their content instead of copying
+    it to host memory. Ignored, with a warning, when torch_memory_saver is not installed. Not
+    supported with ``nccl_ub``."""
+
+    disable_param_buffers_cpu_backup: bool = False
+    """Like ``disable_grad_buffers_cpu_backup``, for the parameter buffers of the distributed
+    optimizer. A buffer that MXFP8 parameters share with gradients needs both flags equal."""
+
     fsdp_double_buffer: bool = False
     """If true, use persistently allocated double buffers for the 
       temporary memory needed in the Megatron FSDP communications.

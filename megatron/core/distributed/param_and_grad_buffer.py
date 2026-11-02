@@ -47,6 +47,31 @@ from .reduce_scatter_with_fp32_accumulation import reduce_scatter_with_fp32_accu
 logger = logging.getLogger(__name__)
 
 try:
+    from torch_memory_saver import torch_memory_saver
+
+    HAVE_TORCH_MEMORY_SAVER = True
+except ImportError:
+    HAVE_TORCH_MEMORY_SAVER = False
+_WARNED_NO_TORCH_MEMORY_SAVER: set = set()
+
+
+def _no_cpu_backup_region(tag: str, enabled: bool, flag_name: str):
+    """Allocation context for a buffer in a torch_memory_saver region without CPU backup."""
+    if not enabled:
+        return nullcontext
+    if not HAVE_TORCH_MEMORY_SAVER:
+        if flag_name not in _WARNED_NO_TORCH_MEMORY_SAVER:
+            log_single_rank(
+                logger,
+                logging.WARNING,
+                f"{flag_name}=True is ignored because torch_memory_saver is not installed.",
+            )
+            _WARNED_NO_TORCH_MEMORY_SAVER.add(flag_name)
+        return nullcontext
+    return functools.partial(torch_memory_saver.region, tag=tag, enable_cpu_backup=False)
+
+
+try:
     if is_torch_min_version("1.13.0"):
         dist_all_gather_func = torch.distributed.all_gather_into_tensor
         dist_reduce_scatter_func = torch.distributed.reduce_scatter_tensor
@@ -1249,6 +1274,31 @@ class _ParamAndGradBuffer:
                 "Gradient-buffer offload is incompatible with MXFP8 parameters because "
                 "parameter and gradient data share storage."
             )
+        disable_grad_cpu_backup = self.ddp_config.disable_grad_buffers_cpu_backup
+        disable_param_cpu_backup = (
+            self.ddp_config.disable_param_buffers_cpu_backup
+            and self.ddp_config.use_distributed_optimizer
+        )
+        if HAVE_TORCH_MEMORY_SAVER and (disable_grad_cpu_backup or disable_param_cpu_backup):
+            if self.nccl_ub:
+                raise ValueError(
+                    "disable_grad_buffers_cpu_backup and disable_param_buffers_cpu_backup are "
+                    "not supported with nccl_ub=True."
+                )
+            if (
+                uses_shared_param_grad_buffer
+                and disable_grad_cpu_backup != disable_param_cpu_backup
+            ):
+                raise ValueError(
+                    "disable_grad_buffers_cpu_backup and disable_param_buffers_cpu_backup must "
+                    "match when MXFP8 parameters share their buffer with the gradients."
+                )
+        grad_alloc_context = _no_cpu_backup_region(
+            "grad_buffer", disable_grad_cpu_backup, "disable_grad_buffers_cpu_backup"
+        )
+        param_alloc_context = _no_cpu_backup_region(
+            "param_buffer", disable_param_cpu_backup, "disable_param_buffers_cpu_backup"
+        )
 
         if self.nccl_ub:
             # If nccl_ub is True, use nccl_allocator to allocate memory for param_data/grad_data.
@@ -1275,7 +1325,7 @@ class _ParamAndGradBuffer:
         if uses_shared_param_grad_buffer:
             # MXFP8 parameter all-gather and gradient reduce-scatter share this storage.
             # Offload-capable layouts reject this case above.
-            with mem_alloc_context():
+            with mem_alloc_context(), grad_alloc_context():
                 self.shared_buffer = torch.zeros(
                     self.numel,
                     dtype=self.grad_dtype,
@@ -1338,8 +1388,10 @@ class _ParamAndGradBuffer:
             else:
                 with mem_alloc_context():
                     if self.ddp_config.use_distributed_optimizer:
-                        allocate_param_buffer()
-                    allocate_grad_buffer()
+                        with param_alloc_context():
+                            allocate_param_buffer()
+                    with grad_alloc_context():
+                        allocate_grad_buffer()
 
         self.grad_data_size = 0
         self.param_data_size = 0
